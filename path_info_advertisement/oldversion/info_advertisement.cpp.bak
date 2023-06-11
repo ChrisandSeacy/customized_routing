@@ -1,0 +1,231 @@
+/*
+ *  文件名：info_advertisement.cpp
+ *  文件说明：每调用一次产生一个csv文件，产生所有链路的（时延，丢包，吞吐率）；
+ *  失败在日志log中记录
+ *  作者：Chris Alt
+ */
+
+
+#include "_mysql.h"
+#include "_public.h"
+#include <sys/ipc.h>
+#include <sys/shm.h>
+
+using namespace std;
+
+CLogFile logfile;   //日志操作
+int shmid;          //共享内存的标志
+
+
+bool WriteFile(const char* outpath, const char* datafmt);
+
+//向共享内存中存入最新路径四元组的文件名字
+struct current_info
+{
+  char current_fileName[301];   //最新生成的文件名字
+  int pid;                      //当前进程的进程号码
+};
+
+
+struct path_info
+{
+  int arcnum;  //边号
+  char src[50];   //源地址
+  char dest[50];  //目的地址
+  int delay;       //时间延迟
+  int packet_loss; //丢包
+  int throughput;  //吞吐率
+  int trust_value; //链路信任值 
+};
+
+
+
+
+vector<struct path_info> path_info_vec; 
+char strddatetime[21]; //时间
+
+int main(int argc, char* argv[])
+{
+  
+    //参数的确认：数据库位置，输出文件的路径，日志file文件名字
+    if(argc!=5)
+    {
+      printf("argc failed\n");
+      printf("using: ./info_advertisement mysql_location output_filepath log_filepath\n");
+      printf("第一个参数：数据库的位置；第二个参数：输出文件的路径；第三个参数：日志文件路径\n");
+      printf("第四个参数：生成文件格式\n");    
+
+      return -1;
+    }
+
+    //打开日志文件
+    if(logfile.Open(argv[3])==false)
+    { 
+      printf("open logfile failed\n");
+      return -1;
+    }   
+
+    logfile.Write("info_advertisement is running \n");
+    
+   //获取当前的时间，当作观测时间
+   memset(strddatetime,0,sizeof(strddatetime));
+   LocalTime(strddatetime,"yyyymmddhh24miss");   
+
+ 
+   //从数据库中取边的源和目的，然后对每一条边生成（时间延迟，丢包，吞吐率）
+    
+   //0.链接数据库
+    connection conn;
+    if(conn.connecttodb("127.0.0.1,root,Xiexiaoxuan79064-,mysql,3306","utf8")!=0){
+     printf("connect database failed.\n%s\n", conn.m_cda.message);
+     return -1;
+    }
+
+   sqlstatement stmt(&conn); //操作sql的对象
+
+   stmt.prepare("select count(*) from routingarc");
+    
+
+
+   //1.查看mysql有几条边，边的数量为arc_num 
+    
+   int arc_num=0;
+   stmt.bindout(1,&arc_num);
+
+   if(stmt.execute()!=0)
+   {
+      printf("stmt.execute() failed.\n%s\n%d\n%s\n",stmt.m_sql,stmt.m_cda.rc,stmt.m_cda.message);
+      return -1;
+   }
+
+   if(stmt.next()!=0)
+   {
+      printf("get arc_num from routingarc failed!\n");
+      return -1;
+   }
+
+   //2.对于每个边取找源地址和目的地址，然后构成结构体
+   //printf("%d\n",arc_num);
+    srand(time(0));
+
+ 
+    for(int i=0;i<arc_num;i++)
+   {
+      struct path_info temp_info;
+      memset(&temp_info,0,sizeof(path_info));
+ 
+
+      temp_info.arcnum=i;
+
+      //找src和dest
+      char sentence[80];
+      sprintf(sentence, "select src,dest from routingarc where id=%d\n",i);  
+      stmt.prepare(sentence);
+     
+      stmt.bindout(1,temp_info.src,49);
+      stmt.bindout(2,temp_info.dest,49);
+
+      if(stmt.execute()!=0)
+      {
+         printf("stmt.execute() failed.\n%s\n%d\n%s\n",stmt.m_sql,stmt.m_cda.rc,stmt.m_cda.message);
+         return -1;
+      }
+
+      if(stmt.next()!=0)
+      {
+         printf("get src,dest from routingarc failed!\n");
+         return -1;
+      }
+     
+      //开始生成三个参数
+      temp_info.delay=rand()%200;
+      temp_info.packet_loss=rand()%200;
+      temp_info.throughput=rand()%200;     
+      temp_info.trust_value=rand()%10;
+
+      path_info_vec.push_back(temp_info);
+   }
+  
+    
+   //写入文件
+   if(strstr(argv[4],"csv")!=0)
+   {
+      WriteFile(argv[2],"csv");
+      cout<<"already write"<<endl;
+   }   
+  
+
+
+    return 0;
+}
+
+bool WriteFile(const char* outpath, const char* datafmt)
+{
+  CFile File;
+  //生成文件名字：例如：INFO_PATH_时间.csv
+  char strFileName[301];
+  sprintf(strFileName,"%s/INFO_PATH_%s_%d.%s",outpath,strddatetime,getpid(),datafmt);
+
+  //打开文件
+  if(File.OpenForRename(strFileName,"w")==false)
+  {
+    logfile.Write("File.OPenForRename(%s) failed.\n",strFileName);
+    return false;
+  } 
+
+  //写入标题
+  if(strcmp(datafmt,"csv")==0){
+     File.Fprintf("边号,源地址,目的地址,时延,丢包,吞吐率,信任值\n"); 
+  } 
+    
+
+  //写入每一条数据
+   for(int i=0;i<path_info_vec.size();i++)
+   {
+     if(strcmp(datafmt,"csv")==0)
+     {
+       File.Fprintf("%d,%s,%s,%d,%d,%d,%d\n",path_info_vec[i].arcnum,path_info_vec[i].src,path_info_vec[i].dest,path_info_vec[i].delay,path_info_vec[i].packet_loss, path_info_vec[i].throughput,path_info_vec[i].trust_value);
+     }
+   } 
+   
+
+    //向共享文件中写入最新生成的文件名字
+    if((shmid=shmget(0x5000,sizeof(struct current_info),0640|IPC_CREAT))==-1)
+    { 
+      logfile.Write("生成共享内存0x5000失败\n");
+      return -1;
+    }    
+   
+   //最新的file的名字
+   struct current_info* cur_file=0;
+
+   if((cur_file=(struct current_info*)shmat(shmid,0,0))==(void*)-1)
+   {
+     logfile.Write("绑定共享内存0x5000失败\n");
+     return -1;
+   }
+
+   strcpy(cur_file->current_fileName,strFileName);
+   cur_file->pid=getpid();    
+   
+   cout<<cur_file->current_fileName<<endl;
+   cout<<cur_file->pid;
+
+
+  //分离共享内存
+  shmdt(cur_file); 
+
+
+
+   File.CloseAndRename();
+  
+   logfile.Write("生成文件成功%s，数据时间%s\n",strFileName,strddatetime);
+    
+
+  //关闭文件
+
+
+
+  return true;
+}
+
